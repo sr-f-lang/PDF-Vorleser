@@ -494,7 +494,7 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     const sel = pickVoice(code);
     const next = () => { if (token !== state.token) return; state.idx++; speakCurrent(); };
     if (sel.engine === 'piper') {
-      setStatus(`Liest vor (${LANGS[code].name}, KI-Stimme) …`);
+      setStatus(`Liest vor (${LANGS[code].name}, KI-Stimme ${sel.key}) …`);
       playPiper(seg.text, sel.key, token, next);
       prefetchNext(code);
     } else {
@@ -677,6 +677,16 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     if (e.target.value) voiceChoice[code] = e.target.value;
     else delete voiceChoice[code];
     saveVoiceChoice();
+    // Läuft gerade diese Sprache, sofort ab dem aktuellen Satz mit der neuen Stimme weiterlesen
+    const cur = state.segments[state.idx];
+    if (state.playing && cur && cur.lang === code) {
+      if (state.paused) {
+        stopPlayback();
+        setStatus('Stimme geändert. Tippe auf Vorlesen, um mit der neuen Stimme weiterzulesen.');
+      } else {
+        speakFrom(state.idx);
+      }
+    }
     if (e.target.value.startsWith('piper:')) {
       // Stimme laden und gleich in den Speicher legen, damit der erste Satz ohne Wartezeit kommt
       const key = e.target.value.slice(6);
