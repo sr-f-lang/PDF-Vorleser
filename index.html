@@ -353,19 +353,39 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     } catch (e) { /* ohne Verbindung bleibt die bisherige Liste */ }
   }
 
+  // Je Stimme eine eigene Sitzung, damit das Modell nur einmal geladen wird und mehrere Stimmen nebeneinander funktionieren
+  const piperSessions = new Map();
+
+  function getSession(key) {
+    if (!piperSessions.has(key)) {
+      const p = (async () => {
+        const lib = await getPiperLib();
+        // Die Bibliothek hält nur eine Sitzung gleichzeitig; vor jeder neuen Stimme zurücksetzen
+        lib.TtsSession._instance = null;
+        return lib.TtsSession.create({
+          voiceId: key,
+          progress: (prog) => {
+            if (prog && prog.total) {
+              const msg = `KI-Stimme wird geladen … ${Math.round(prog.loaded * 100 / prog.total)} %`;
+              setStatus(msg);
+              showVoiceInfo(msg);
+            }
+          }
+        });
+      })();
+      piperSessions.set(key, p);
+      p.catch(() => piperSessions.delete(key));
+    }
+    return piperSessions.get(key);
+  }
+
   // Piper-Stimme synthetisieren (lädt beim ersten Mal das Modell)
   function synthPiper(text, key) {
     const cacheKey = key + '\u0001' + text;
     if (piperCache.has(cacheKey)) return piperCache.get(cacheKey);
     const p = (async () => {
-      const lib = await getPiperLib();
-      const blob = await lib.predict({ text, voiceId: key }, (prog) => {
-        if (prog && prog.total) {
-          const msg = `KI-Stimme wird geladen … ${Math.round(prog.loaded * 100 / prog.total)} %`;
-          setStatus(msg);
-          showVoiceInfo(msg);
-        }
-      });
+      const session = await getSession(key);
+      const blob = await session.predict(text);
       piperStored.add(key);
       return URL.createObjectURL(blob);
     })();
@@ -470,11 +490,13 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 
   // Nächsten Abschnitt schon im Hintergrund vorbereiten, wenn er mit KI-Stimme gelesen wird
   function prefetchNext(code) {
-    const nxt = state.segments[state.idx + 1];
-    if (!nxt) return;
-    const c = LANGS[nxt.lang] ? nxt.lang : code;
-    const sel = pickVoice(c);
-    if (sel.engine === 'piper') synthPiper(nxt.text, sel.key).catch(() => {});
+    for (let k = 1; k <= 2; k++) {
+      const nxt = state.segments[state.idx + k];
+      if (!nxt) break;
+      const c = LANGS[nxt.lang] ? nxt.lang : code;
+      const sel = pickVoice(c);
+      if (sel.engine === 'piper') synthPiper(nxt.text, sel.key).catch(() => {});
+    }
   }
 
   function speakFrom(i) {
