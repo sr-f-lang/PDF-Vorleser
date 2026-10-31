@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2b5fd9">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="PDF-Vorleser">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>PDF-Vorleser</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<script type="importmap">
+{ "imports": { "onnxruntime-web/wasm": "./ort-shim.mjs" } }
+</script>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--text:#1d2330;--muted:#6b7280;--accent:#2b5fd9;--border:#dde1e7;--hl:#fff1a8;--tag:#e6ecff;--tagtext:#2b5fd9}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#14171c;--card:#1e222a;--text:#e8ebf0;--muted:#9aa3b2;--accent:#6d93ff;--border:#2e3440;--hl:#5a4a00;--tag:#243056;--tagtext:#9db5ff}}
+:root[data-theme="dark"]{--bg:#14171c;--card:#1e222a;--text:#e8ebf0;--muted:#9aa3b2;--accent:#6d93ff;--border:#2e3440;--hl:#5a4a00;--tag:#243056;--tagtext:#9db5ff}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:16px 16px calc(32px + env(safe-area-inset-bottom))}
+.top{display:flex;align-items:center;justify-content:space-between;margin:8px 0 16px}
+h1{font-size:1.5rem;margin:0}
+h2{font-size:1.05rem;margin:0 0 10px}
+h3{font-size:.95rem;margin:18px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px}
+.muted{color:var(--muted);font-size:.92rem}
+.drop{position:relative;display:block;text-align:center;padding:28px 12px;border:2px dashed var(--border);border-radius:12px;cursor:pointer}
+.drop.over{border-color:var(--accent);background:var(--tag)}
+.drop input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+label.row{display:flex;align-items:center;gap:10px;margin:8px 0;flex-wrap:wrap}
+select,button{font:inherit;color:var(--text);background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px 12px}
+select{min-width:0}
+fieldset{border:1px solid var(--border);border-radius:10px;margin:10px 0;padding:8px 12px}
+legend{padding:0 6px;color:var(--muted);font-size:.92rem}
+fieldset label{display:inline-flex;align-items:center;gap:6px;margin:4px 12px 4px 0}
+.btns{display:flex;gap:10px;flex-wrap:wrap}
+.btns button{flex:1 1 140px;font-weight:600;background:var(--accent);color:#fff;border-color:var(--accent)}
+.btns button.secondary{background:var(--card);color:var(--text);border-color:var(--border);font-weight:500}
+button:disabled{opacity:.45}
+.gear{width:44px;height:44px;padding:0;font-size:1.4rem;line-height:1;display:flex;align-items:center;justify-content:center}
+.speeds{display:flex;align-items:center;gap:8px}
+.speeds button{width:48px;height:44px;padding:0;font-size:1.3rem;font-weight:600}
+.rateval{min-width:72px;text-align:center;font-weight:600;font-variant-numeric:tabular-nums}
+progress{width:100%;height:8px;margin-top:12px;accent-color:var(--accent)}
+#status{min-height:1.5em;margin:10px 0 0;color:var(--muted)}
+.text{font-size:1.05rem;line-height:1.7;max-height:60vh;overflow:auto;-webkit-overflow-scrolling:touch}
+.text p{margin:0 0 14px}
+.tag{display:inline-block;font-size:.75rem;font-weight:600;background:var(--tag);color:var(--tagtext);border-radius:6px;padding:1px 7px;margin-bottom:4px}
+.seg{cursor:pointer;border-radius:4px}
+.seg.cur{background:var(--hl)}
+details{margin-top:10px}
+summary{cursor:pointer;color:var(--accent)}
+details ul{padding-left:20px}
+/* Einstellungsfenster */
+dialog{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:14px;width:min(640px,calc(100% - 32px));max-height:88vh;padding:0}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.dlg{padding:16px}
+.dlg-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.vrow{display:flex;align-items:center;gap:8px;margin:8px 0}
+.vrow > span{min-width:96px;font-weight:500}
+.vrow select{flex:1;min-width:0}
+.vtest{white-space:nowrap;font-weight:600;color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>PDF-Vorleser</h1>
+    <button id="openSettings" class="gear" type="button" aria-label="Einstellungen">⚙</button>
+  </header>
+
+  <section class="card">
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="application/pdf,.pdf">
+      <span id="dropText">PDF hier ablegen oder antippen zum Auswählen</span>
+    </label>
+  </section>
+
+  <section class="card">
+    <div class="btns">
+      <button id="play" disabled>▶ Vorlesen</button>
+      <button id="stop" class="secondary" disabled>⏹ Stopp</button>
+    </div>
+    <div class="row">
+      <span>Geschwindigkeit</span>
+      <div class="speeds" id="speeds">
+        <button type="button" id="slower" aria-label="Langsamer">−</button>
+        <span id="rateVal" class="rateval">1×</span>
+        <button type="button" id="faster" aria-label="Schneller">+</button>
+      </div>
+    </div>
+    <progress id="prog" value="0" max="1"></progress>
+    <p id="status" role="status"></p>
+  </section>
+
+  <section class="card">
+    <h2>Text</h2>
+    <div id="text" class="text"><p class="muted">Noch keine PDF geladen. Tipp auf einen Satz, um ab dort vorzulesen.</p></div>
+  </section>
+</main>
+
+<dialog id="settings">
+  <div class="dlg">
+    <div class="dlg-head">
+      <h2>Einstellungen</h2>
+      <button id="closeSettings" type="button">Fertig</button>
+    </div>
+
+    <h3>Stimmen</h3>
+    <p class="muted" id="voiceInfo"></p>
+    <div id="voiceSel"></div>
+    <p class="muted">KI-Stimmen (Piper) klingen natürlicher. Sie werden beim ersten Gebrauch einmal heruntergeladen und funktionieren danach offline. Tippe auf „Testen“, um einen Beispielsatz zu hören.</p>
+    <details>
+      <summary>Fehlt eine Systemstimme? So installierst du sie</summary>
+      <ul>
+        <li><strong>iPhone/iPad:</strong> Einstellungen → Bedienungshilfen → Gesprochene Inhalte → Stimmen → Sprache wählen → Stimme laden.</li>
+        <li><strong>Mac:</strong> Systemeinstellungen → Bedienungshilfen → Gesprochene Inhalte → Systemstimme → Systemstimmen verwalten.</li>
+        <li><strong>Windows:</strong> Einstellungen → Zeit und Sprache → Sprache → Sprache hinzufügen (Sprachausgabe aktivieren).</li>
+        <li><strong>Android:</strong> Einstellungen → Sprache → Text-zu-Sprache → Stimmdaten herunterladen.</li>
+      </ul>
+    </details>
+
+    <h3>Standard und Texterkennung</h3>
+    <label class="row">Standardsprache
+      <select id="defaultLang">
+        <option value="de">Deutsch</option>
+        <option value="en">Englisch</option>
+        <option value="fr">Französisch</option>
+        <option value="es">Spanisch</option>
+        <option value="it">Italienisch</option>
+      </select>
+    </label>
+    <p class="muted">Wird für Absätze verwendet, deren Sprache nicht erkannt wird.</p>
+    <fieldset id="ocrLangs">
+      <legend>Sprachen für die Texterkennung bei Scan-PDFs</legend>
+      <label><input type="checkbox" value="deu" checked> Deutsch</label>
+      <label><input type="checkbox" value="eng" checked> Englisch</label>
+      <label><input type="checkbox" value="fra"> Französisch</label>
+      <label><input type="checkbox" value="spa"> Spanisch</label>
+      <label><input type="checkbox" value="ita"> Italienisch</label>
+    </fieldset>
+  </div>
+</dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  // Sprachen: Anzeigename, Sprachcode für Stimme, Code für Tesseract, typische Wörter zur Erkennung
+  const LANGS = {
+    de: { name: 'Deutsch', bcp: 'de-DE', tess: 'deu', words: new Set('der die und ist nicht ein eine zu mit auf für von den dem das sich auch werden wird sind oder wenn aber nach bei wir ich sie es'.split(' ')) },
+    en: { name: 'Englisch', bcp: 'en-US', tess: 'eng', words: new Set('the and is are of to in that it for with on as was this be by not or from have they you at which'.split(' ')) },
+    fr: { name: 'Französisch', bcp: 'fr-FR', tess: 'fra', words: new Set('le la les et est des une un du que qui dans pour pas sur avec sont au ce il elle nous vous par'.split(' ')) },
+    es: { name: 'Spanisch', bcp: 'es-ES', tess: 'spa', words: new Set('el los las y es de que en una por para con no se del al lo como pero más su sus este'.split(' ')) },
+    it: { name: 'Italienisch', bcp: 'it-IT', tess: 'ita', words: new Set('il di che è un una per non sono della del nel con gli si come ma anche questo più dei alla'.split(' ')) }
+  };
+
+  // Beispielsätze für den Stimmtest
+  const SAMPLES = {
+    de: 'Hallo, so klingt diese Stimme für deutschen Text. Das ist ein kurzer Beispielsatz.',
+    en: 'Hello, this is how this voice sounds for English text. This is a short example sentence.',
+    fr: 'Bonjour, voici comment cette voix lit un texte français. Ceci est une courte phrase d’exemple.',
+    es: 'Hola, así suena esta voz con un texto en español. Esta es una frase de ejemplo corta.',
+    it: 'Ciao, ecco come suona questa voce con un testo italiano. Questa è una breve frase di esempio.'
+  };
+
+  // Geschwindigkeitsstufen für die +/- Tasten
+  const RATES = [0.5, 1, 1.25, 1.5, 2];
+  const RATE_LABELS = ['0,5×', '1×', '1,25×', '1,5×', '2×'];
+
+  // Piper-KI-Stimmen (Bibliothek und Stimmliste werden erst bei Bedarf geladen)
+  const PIPER_URL = 'https://cdn.jsdelivr.net/npm/@mintplex-labs/piper-tts-web@1.0.5/dist/piper-tts-web.js';
+  const QUALITY_RANK = { high: 4, medium: 3, low: 2, x_low: 1 };
+
+  const state = { segments: [], idx: 0, playing: false, paused: false, token: 0, rate: 1, rateIdx: 1 };
+  let currentAudio = null;     // gerade laufende KI-Stimme (Audio-Element)
+  let piperLib = null;         // geladene Piper-Bibliothek
+  let piperCatalog = null;     // Liste aller deutschen/englischen usw. Piper-Stimmen
+  let piperStored = new Set(); // bereits im Gerät gespeicherte Stimmen
+  const piperCache = new Map(); // Text + Stimme -> Audio-URL
+  const $ = (s) => document.querySelector(s);
+
+  // ---------- Status & Buttons ----------
+  function setStatus(msg) { $('#status').textContent = msg; }
+
+  function updateUI() {
+    const has = state.segments.length > 0;
+    $('#play').disabled = !has;
+    $('#stop').disabled = !has;
+    $('#play').textContent = state.playing && !state.paused ? '⏸ Pause' : '▶ Vorlesen';
+    $('#prog').value = has ? state.idx / state.segments.length : 0;
+  }
+
+  // ---------- Spracherkennung (Wortlisten-Heuristik) ----------
+  function detectLang(text) {
+    const words = text.toLowerCase().split(/[^\p{L}]+/u).filter(Boolean);
+    if (words.length < 4) return null;
+    const score = {};
+    for (const w of words) for (const code in LANGS) if (LANGS[code].words.has(w)) score[code] = (score[code] || 0) + 1;
+    let best = null, max = 0;
+    for (const c in score) if (score[c] > max) { max = score[c]; best = c; }
+    return best && max >= 2 && max / words.length >= 0.12 ? best : null;
+  }
+
+  // ---------- Text in Absätze und Sätze zerlegen ----------
+  function splitSentences(p) {
+    const parts = p.split(/(?<=[.!?…])\s+(?=[\p{Lu}\d„"«(¿¡])/u);
+    const out = [];
+    for (let s of parts) {
+      while (s.length > 240) {
+        let cut = s.lastIndexOf(' ', 240);
+        if (cut < 80) cut = 240;
+        out.push(s.slice(0, cut).trim());
+        s = s.slice(cut).trim();
+      }
+      if (s) out.push(s);
+    }
+    return out;
+  }
+
+  function buildSegments(text) {
+    const paras = text
+      .replace(/-\n(?=\p{Ll})/gu, '')
+      .split(/\n\s*\n|(?<=[.!?:…])\n(?=\s*[\p{Lu}\d„"(])/u)
+      .map(p => p.replace(/\s*\n\s*/g, ' ').replace(/\s{2,}/g, ' ').trim())
+      .filter(p => p.length > 1);
+    const segs = [];
+    let last = $('#defaultLang').value;
+    paras.forEach((p, pi) => {
+      const lang = detectLang(p) || last;
+      last = lang;
+      for (const s of splitSentences(p)) segs.push({ text: s, lang, para: pi });
+    });
+    return segs;
+  }
+
+  // ---------- PDF lesen ----------
+  async function extractText(data) {
+    const pdf = await pdfjsLib.getDocument({ data: data.slice() }).promise;
+    const pages = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      setStatus(`Text wird gelesen … Seite ${p} von ${pdf.numPages}`);
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      let line = '';
+      for (const it of content.items) line += it.str + (it.hasEOL ? '\n' : ' ');
+      pages.push(line);
+    }
+    return pages.join('\n\n');
+  }
+
+  async function ocrPdf(data, langs) {
+    const pdf = await pdfjsLib.getDocument({ data: data.slice() }).promise;
+    const worker = await Tesseract.createWorker(langs.join('+'), 1, {
+      logger: (m) => { if (m.status === 'recognizing text') setStatus(`Texterkennung … ${Math.round(m.progress * 100)} %`); }
+    });
+    const pages = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      setStatus(`Seite ${p} von ${pdf.numPages} wird erkannt …`);
+      const page = await pdf.getPage(p);
+      const vp = page.getViewport({ scale: 2 });
+      const canvas = document.createElement('canvas');
+      canvas.width = vp.width;
+      canvas.height = vp.height;
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+      const { data: { text } } = await worker.recognize(canvas);
+      pages.push(text);
+      canvas.width = 0;
+    }
+    await worker.terminate();
+    return pages.join('\n\n');
+  }
+
+  // ---------- Stimmen-Auswahl ----------
+  // Gespeichert wird pro Sprache: "piper:<key>" oder "sys:<voiceURI>"
+  const VOICE_KEY = 'pdfVorleserStimmen';
+
+  function loadVoiceChoice() {
+    try { return JSON.parse(localStorage.getItem(VOICE_KEY) || '{}'); } catch (e) { return {}; }
+  }
+
+  function saveVoiceChoice() {
+    try { localStorage.setItem(VOICE_KEY, JSON.stringify(voiceChoice)); } catch (e) { /* Speicher nicht verfügbar */ }
+  }
+
+  const voiceChoice = loadVoiceChoice();
+
+  // Systemstimmen: Qualität anhand des Namens erkennen (Premium > Erweitert/Natural > Rest)
+  function qualityRank(v) {
+    const id = v.voiceURI + ' ' + v.name;
+    if (/premium/i.test(id)) return 3;
+    if (/enhanced|erweitert|natural/i.test(id)) return 2;
+    return 1;
+  }
+
+  function voiceLabel(v) {
+    const id = v.voiceURI + ' ' + v.name;
+    let tag = '';
+    if (/premium/i.test(id)) tag = ' ★ Premium';
+    else if (/enhanced|erweitert/i.test(id)) tag = ' ★ Erweitert';
+    else if (/natural/i.test(id)) tag = ' ★ Natural';
+    return v.name + tag + (v.localService ? '' : ' (online)');
+  }
+
+  // Liefert, welche Stimme für eine Sprache verwendet wird
+  function pickVoice(code) {
+    const raw = voiceChoice[code];
+    if (raw && raw.startsWith('piper:')) return { engine: 'piper', key: raw.slice(6) };
+    const uri = raw ? (raw.startsWith('sys:') ? raw.slice(4) : raw) : null; // ältere Speicherung ohne Präfix bleibt gültig
+    const voices = speechSynthesis.getVoices();
+    if (uri) {
+      const v = voices.find(x => x.voiceURI === uri);
+      if (v) return { engine: 'sys', voice: v };
+    }
+    const same = voices.filter(v => v.lang.slice(0, 2) === code).sort((a, b) => qualityRank(b) - qualityRank(a));
+    return { engine: 'sys', voice: same[0] || null };
+  }
+
+  // Piper-Bibliothek und Stimmliste laden (nur die Liste, keine Modelle)
+  async function getPiperLib() {
+    if (!piperLib) piperLib = await import(PIPER_URL);
+    return piperLib;
+  }
+
+  async function loadPiperCatalog() {
+    if (piperCatalog) return piperCatalog;
+    const lib = await getPiperLib();
+    const all = await lib.voices();
+    const entries = Array.isArray(all) ? all : Object.entries(all).map(([k, v]) => ({ key: k, ...v }));
+    piperCatalog = entries.map(v => ({
+      key: v.key,
+      name: v.name || v.key,
+      quality: v.quality || '',
+      family: (v.language && v.language.family) || String(v.key).slice(0, 2),
+      mb: Math.round(Object.entries(v.files || {})
+        .filter(([p]) => p.endsWith('.onnx'))
+        .reduce((s, [, f]) => s + (f.size_bytes || 0), 0) / 1e6)
+    }));
+    return piperCatalog;
+  }
+
+  async function refreshStored() {
+    try {
+      const lib = await getPiperLib();
+      piperStored = new Set((await lib.stored()).map(x => (typeof x === 'string' ? x : x.key)));
+    } catch (e) { /* ohne Verbindung bleibt die bisherige Liste */ }
+  }
+
+  // Piper-Stimme synthetisieren (lädt beim ersten Mal das Modell)
+  function synthPiper(text, key) {
+    const cacheKey = key + '\u0001' + text;
+    if (piperCache.has(cacheKey)) return piperCache.get(cacheKey);
+    const p = (async () => {
+      const lib = await getPiperLib();
+      const blob = await lib.predict({ text, voiceId: key }, (prog) => {
+        if (prog && prog.total) {
+          const msg = `KI-Stimme wird geladen … ${Math.round(prog.loaded * 100 / prog.total)} %`;
+          setStatus(msg);
+          showVoiceInfo(msg);
+        }
+      });
+      piperStored.add(key);
+      return URL.createObjectURL(blob);
+    })();
+    piperCache.set(cacheKey, p);
+    if (piperCache.size > 30) piperCache.delete(piperCache.keys().next().value);
+    p.catch(() => piperCache.delete(cacheKey));
+    return p;
+  }
+
+  // Stimme sofort bei Auswahl herunterladen (einmalig, danach offline verfügbar)
+  const piperDownloading = new Set();
+
+  async function downloadPiper(key) {
+    if (piperStored.has(key) || piperDownloading.has(key)) return;
+    piperDownloading.add(key);
+    try {
+      const lib = await getPiperLib();
+      await lib.download(key, (prog) => {
+        if (prog && prog.total) {
+          const msg = `Stimme „${key}“ wird geladen … ${Math.round(prog.loaded * 100 / prog.total)} %`;
+          setStatus(msg);
+          showVoiceInfo(msg);
+        }
+      });
+      piperStored.add(key);
+      setStatus(`Stimme „${key}“ ist gespeichert und funktioniert offline.`);
+    } catch (err) {
+      console.error(err);
+      setStatus('Download der Stimme fehlgeschlagen: ' + (err && err.message ? err.message : err));
+    } finally {
+      piperDownloading.delete(key);
+      buildVoiceSelectors();
+    }
+  }
+
+  // Spielt einen Text mit einer Piper-Stimme ab. onEnd wird nach Ende oder Fehler aufgerufen.
+  async function playPiper(text, key, token, onEnd) {
+    let url;
+    try {
+      url = await synthPiper(text, key);
+    } catch (err) {
+      console.error(err);
+      if (token !== state.token) return;
+      // Bei Fehlern anhalten statt alle Sätze zu überspringen
+      stopWithError('KI-Stimme konnte nicht geladen werden: ' + (err && err.message ? err.message : err) + '. Bitte in den Einstellungen eine andere Stimme wählen.');
+      return;
+    }
+    if (token !== state.token) return;
+    const a = new Audio(url);
+    a.playbackRate = state.rate;
+    currentAudio = a;
+    a.onended = () => { if (token !== state.token) return; currentAudio = null; onEnd(); };
+    a.onerror = () => { if (token !== state.token) return; currentAudio = null; stopWithError('Die KI-Stimme konnte nicht abgespielt werden.'); };
+    if (!state.paused) a.play().catch(() => { if (token === state.token) { currentAudio = null; stopWithError('Die KI-Stimme konnte nicht abgespielt werden. Bitte erneut auf Vorlesen tippen.'); } });
+  }
+
+  function stopWithError(msg) {
+    stopPlayback();
+    setStatus(msg);
+  }
+
+  function haltAudio() {
+    if (currentAudio) {
+      currentAudio.onended = null;
+      currentAudio.onerror = null;
+      currentAudio.pause();
+      currentAudio = null;
+    }
+  }
+
+  // ---------- Vorlesen ----------
+  function speakSystem(text, sel, token, onEnd) {
+    const u = new SpeechSynthesisUtterance(text);
+    if (sel.voice) { u.voice = sel.voice; u.lang = sel.voice.lang; }
+    u.rate = state.rate;
+    u.onend = () => { if (token === state.token) onEnd(); };
+    u.onerror = (e) => {
+      if (token !== state.token || e.error === 'canceled' || e.error === 'interrupted') return;
+      if (e.error === 'not-allowed') { setStatus('Vorlesen wurde vom Gerät blockiert. Bitte erneut auf Vorlesen tippen.'); stopPlayback(); return; }
+      onEnd();
+    };
+    speechSynthesis.speak(u);
+  }
+
+  function speakCurrent() {
+    const token = state.token;
+    if (state.idx >= state.segments.length) return finish();
+    const seg = state.segments[state.idx];
+    highlight();
+    const code = LANGS[seg.lang] ? seg.lang : $('#defaultLang').value;
+    const sel = pickVoice(code);
+    const next = () => { if (token !== state.token) return; state.idx++; speakCurrent(); };
+    if (sel.engine === 'piper') {
+      setStatus(`Liest vor (${LANGS[code].name}, KI-Stimme) …`);
+      playPiper(seg.text, sel.key, token, next);
+      prefetchNext(code);
+    } else {
+      setStatus(`Liest vor (${LANGS[code].name}) …`);
+      speakSystem(seg.text, sel, token, next);
+    }
+  }
+
+  // Nächsten Abschnitt schon im Hintergrund vorbereiten, wenn er mit KI-Stimme gelesen wird
+  function prefetchNext(code) {
+    const nxt = state.segments[state.idx + 1];
+    if (!nxt) return;
+    const c = LANGS[nxt.lang] ? nxt.lang : code;
+    const sel = pickVoice(c);
+    if (sel.engine === 'piper') synthPiper(nxt.text, sel.key).catch(() => {});
+  }
+
+  function speakFrom(i) {
+    if (!('speechSynthesis' in window)) return setStatus('Vorlesen wird von diesem Browser nicht unterstützt.');
+    haltAudio();
+    speechSynthesis.cancel();
+    state.token++;
+    state.idx = i;
+    state.playing = true;
+    state.paused = false;
+    speakCurrent();
+    updateUI();
+  }
+
+  function togglePlay() {
+    if (!state.segments.length) return;
+    if (state.playing && !state.paused) {
+      if (currentAudio) currentAudio.pause();
+      speechSynthesis.pause();
+      state.paused = true;
+      setStatus('Pausiert');
+    } else if (state.paused) {
+      if (currentAudio) currentAudio.play().catch(() => {});
+      speechSynthesis.resume();
+      state.paused = false;
+      setStatus('Liest weiter …');
+    } else {
+      if (state.idx >= state.segments.length) state.idx = 0;
+      speakFrom(state.idx);
+    }
+    updateUI();
+  }
+
+  function stopPlayback() {
+    state.token++;
+    haltAudio();
+    speechSynthesis.cancel();
+    state.playing = false;
+    state.paused = false;
+    updateUI();
+  }
+
+  function stop() {
+    stopPlayback();
+    state.idx = 0;
+    highlight();
+    setStatus(state.segments.length ? 'Gestoppt' : '');
+  }
+
+  function finish() {
+    state.playing = false;
+    state.paused = false;
+    state.idx = state.segments.length;
+    state.token++;
+    haltAudio();
+    highlight();
+    setStatus('Fertig.');
+    updateUI();
+  }
+
+  function highlight() {
+    document.querySelectorAll('.seg.cur').forEach(e => e.classList.remove('cur'));
+    const el = document.querySelector(`.seg[data-i="${state.idx}"]`);
+    if (el) {
+      el.classList.add('cur');
+      if (state.playing) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+    updateUI();
+  }
+
+  // ---------- Stimmtest ----------
+  function speakSample(code) {
+    stopPlayback();
+    const token = state.token;
+    const sel = pickVoice(code);
+    if (sel.engine === 'piper') {
+      playPiper(SAMPLES[code], sel.key, token, () => {});
+    } else if ('speechSynthesis' in window) {
+      speakSystem(SAMPLES[code], sel, token, () => {});
+    }
+  }
+
+  // ---------- Stimmen-Dialog ----------
+  function showVoiceInfo(extra) {
+    const voices = 'speechSynthesis' in window ? speechSynthesis.getVoices() : [];
+    const supported = Object.values(LANGS).map(l => l.bcp.slice(0, 2));
+    const found = [...new Set(voices.map(v => v.lang.slice(0, 2)))].filter(l => supported.includes(l));
+    const names = Object.entries(LANGS).filter(([, l]) => found.includes(l.bcp.slice(0, 2))).map(([, l]) => l.name);
+    let text = names.length ? 'Systemstimmen für: ' + names.join(', ') + '.' : 'Keine Systemstimmen für die unterstützten Sprachen gefunden.';
+    if (extra) text = extra + '\n' + text;
+    $('#voiceInfo').textContent = text;
+  }
+
+  async function buildVoiceSelectors() {
+    const box = $('#voiceSel');
+    let catalog = null;
+    try {
+      catalog = await loadPiperCatalog();
+      await refreshStored();
+    } catch (e) {
+      catalog = null;
+    }
+    const voices = 'speechSynthesis' in window ? speechSynthesis.getVoices() : [];
+    box.innerHTML = '';
+
+    for (const code of Object.keys(LANGS)) {
+      const row = document.createElement('div');
+      row.className = 'vrow';
+      const label = document.createElement('span');
+      label.textContent = LANGS[code].name;
+
+      const sel = document.createElement('select');
+      sel.dataset.lang = code;
+      sel.add(new Option('Automatisch (beste verfügbare)', ''));
+
+      if (catalog) {
+        const list = catalog
+          .filter(v => v.family === code)
+          .sort((a, b) => (QUALITY_RANK[b.quality] || 0) - (QUALITY_RANK[a.quality] || 0) || a.name.localeCompare(b.name));
+        if (list.length) {
+          const og = document.createElement('optgroup');
+          og.label = 'KI-Stimmen (Piper)';
+          for (const v of list) {
+            const stored = piperStored.has(v.key);
+            const text = `★ ${v.name} · ${v.quality}` + (stored ? ' ✓' : ` · ${v.mb} MB laden`);
+            og.appendChild(new Option(text, 'piper:' + v.key));
+          }
+          sel.appendChild(og);
+        }
+      } else {
+        sel.add(new Option('KI-Stimmen nicht verfügbar (keine Verbindung)', '', false, false));
+      }
+
+      const sysList = voices.filter(v => v.lang.slice(0, 2) === code).sort((a, b) => qualityRank(b) - qualityRank(a) || a.name.localeCompare(b.name));
+      if (sysList.length) {
+        const og2 = document.createElement('optgroup');
+        og2.label = 'Systemstimmen';
+        for (const v of sysList) og2.appendChild(new Option(voiceLabel(v), 'sys:' + v.voiceURI));
+        sel.appendChild(og2);
+      }
+
+      // aktuelle Auswahl anzeigen (ältere Speicherung ohne Präfix wird als Systemstimme gelesen)
+      const raw = voiceChoice[code];
+      const cur = raw ? (raw.startsWith('piper:') || raw.startsWith('sys:') ? raw : 'sys:' + raw) : '';
+      sel.value = [...sel.options].some(o => o.value === cur) ? cur : '';
+
+      const test = document.createElement('button');
+      test.type = 'button';
+      test.className = 'vtest';
+      test.dataset.test = code;
+      test.textContent = '▶ Testen';
+
+      row.append(label, sel, test);
+      box.appendChild(row);
+    }
+    showVoiceInfo();
+  }
+
+  $('#voiceSel').addEventListener('change', (e) => {
+    const code = e.target.dataset.lang;
+    if (!code) return;
+    if (e.target.value) voiceChoice[code] = e.target.value;
+    else delete voiceChoice[code];
+    saveVoiceChoice();
+    if (e.target.value.startsWith('piper:')) downloadPiper(e.target.value.slice(6));
+  });
+
+  $('#voiceSel').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-test]');
+    if (btn) speakSample(btn.dataset.test);
+  });
+
+  // ---------- Datei verarbeiten ----------
+  async function handleFile(file) {
+    if (!file) return;
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) return setStatus('Bitte eine PDF-Datei wählen.');
+    stopPlayback();
+    $('#dropText').textContent = file.name;
+    setStatus(`„${file.name}“ wird geöffnet …`);
+    try {
+      const data = new Uint8Array(await file.arrayBuffer());
+      let text = await extractText(data);
+      if (text.replace(/\s/g, '').length < 40) {
+        const langs = [...document.querySelectorAll('#ocrLangs input:checked')].map(i => i.value);
+        if (!langs.length) return setStatus('Keine Textebene gefunden. Bitte mindestens eine Sprache für die Texterkennung in den Einstellungen wählen.');
+        setStatus('Keine Textebene gefunden – Texterkennung (OCR) startet. Das dauert etwas länger.');
+        text = await ocrPdf(data, langs);
+      }
+      state.segments = buildSegments(text);
+      state.idx = 0;
+      if (!state.segments.length) { $('#text').innerHTML = ''; return setStatus('Kein Text gefunden.'); }
+      renderText();
+      setStatus(`${state.segments.length} Sätze bereit. Tippe auf Vorlesen oder auf einen Satz.`);
+      updateUI();
+    } catch (err) {
+      console.error(err);
+      setStatus('Fehler beim Lesen der PDF: ' + (err && err.message ? err.message : err));
+    }
+  }
+
+  function renderText() {
+    const box = $('#text');
+    box.innerHTML = '';
+    let p = null, lastPara = -1;
+    state.segments.forEach((s, i) => {
+      if (s.para !== lastPara) {
+        p = document.createElement('p');
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = LANGS[s.lang].name;
+        p.appendChild(tag);
+        box.appendChild(p);
+        lastPara = s.para;
+      }
+      const span = document.createElement('span');
+      span.className = 'seg';
+      span.dataset.i = i;
+      span.textContent = s.text + ' ';
+      p.appendChild(span);
+    });
+  }
+
+  // ---------- Geschwindigkeit ----------
+  function updateRateUI() {
+    $('#rateVal').textContent = RATE_LABELS[state.rateIdx];
+    $('#slower').disabled = state.rateIdx === 0;
+    $('#faster').disabled = state.rateIdx === RATES.length - 1;
+  }
+
+  function changeRate(delta) {
+    const i = Math.min(RATES.length - 1, Math.max(0, state.rateIdx + delta));
+    if (i === state.rateIdx) return;
+    state.rateIdx = i;
+    state.rate = RATES[i];
+    updateRateUI();
+    if (currentAudio) currentAudio.playbackRate = state.rate;
+    else if (state.playing && !state.paused) speakFrom(state.idx);
+  }
+
+  // ---------- Ereignisse ----------
+  $('#file').addEventListener('change', (e) => handleFile(e.target.files[0]));
+
+  const drop = $('#drop');
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => handleFile(e.dataTransfer.files[0]));
+
+  $('#play').addEventListener('click', togglePlay);
+  $('#stop').addEventListener('click', stop);
+  $('#text').addEventListener('click', (e) => {
+    const seg = e.target.closest('.seg');
+    if (seg) speakFrom(Number(seg.dataset.i));
+  });
+
+  $('#slower').addEventListener('click', () => changeRate(-1));
+  $('#faster').addEventListener('click', () => changeRate(1));
+  updateRateUI();
+
+  $('#openSettings').addEventListener('click', () => {
+    $('#settings').showModal();
+    buildVoiceSelectors();
+  });
+  $('#closeSettings').addEventListener('click', () => $('#settings').close());
+  $('#settings').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+
+  if ('speechSynthesis' in window) {
+    speechSynthesis.onvoiceschanged = () => showVoiceInfo();
+  }
+  showVoiceInfo();
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  }
+})();
+</script>
+</body>
+</html>
