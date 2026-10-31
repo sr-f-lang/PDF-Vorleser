@@ -210,13 +210,17 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
   }
 
   // ---------- Text in Absätze und Sätze zerlegen ----------
-  function splitSentences(p) {
+  // Kurze Abschnitte (ca. 1 Satz oder Teilsatz) lassen sich mit KI-Stimme schneller erzeugen und starten früher.
+  function splitSentences(p, max = 150) {
     const parts = p.split(/(?<=[.!?…])\s+(?=[\p{Lu}\d„"«(¿¡])/u);
     const out = [];
     for (let s of parts) {
-      while (s.length > 240) {
-        let cut = s.lastIndexOf(' ', 240);
-        if (cut < 80) cut = 240;
+      while (s.length > max) {
+        const head = s.slice(0, max);
+        // bevorzugt an Komma, Semikolon oder Doppelpunkt trennen, sonst am Leerzeichen
+        const m = head.match(/^.*[,;:]\s/su);
+        let cut = m ? m[0].length : head.lastIndexOf(' ');
+        if (cut < 35) cut = max;
         out.push(s.slice(0, cut).trim());
         s = s.slice(cut).trim();
       }
@@ -236,7 +240,8 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     paras.forEach((p, pi) => {
       const lang = detectLang(p) || last;
       last = lang;
-      for (const s of splitSentences(p)) segs.push({ text: s, lang, para: pi });
+      // der allererste Abschnitt ist bewusst kurz, damit das Vorlesen sofort beginnt
+      for (const s of splitSentences(p, segs.length === 0 ? 80 : 150)) segs.push({ text: s, lang, para: pi });
     });
     return segs;
   }
@@ -355,12 +360,13 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 
   // Je Stimme eine eigene Sitzung, damit das Modell nur einmal geladen wird und mehrere Stimmen nebeneinander funktionieren
   const piperSessions = new Map();
+  // Sitzungen nacheinander anlegen (die Bibliothek hält nur eine gleichzeitig)
+  let sessionChain = Promise.resolve();
 
   function getSession(key) {
     if (!piperSessions.has(key)) {
-      const p = (async () => {
+      const p = sessionChain.then(async () => {
         const lib = await getPiperLib();
-        // Die Bibliothek hält nur eine Sitzung gleichzeitig; vor jeder neuen Stimme zurücksetzen
         lib.TtsSession._instance = null;
         return lib.TtsSession.create({
           voiceId: key,
@@ -372,23 +378,28 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
             }
           }
         });
-      })();
+      });
+      sessionChain = p.catch(() => {});
       piperSessions.set(key, p);
       p.catch(() => piperSessions.delete(key));
     }
     return piperSessions.get(key);
   }
 
+  // Synthese nacheinander in einer Warteschlange: der aktuelle Abschnitt kommt zuerst, dahinter die nächsten
+  let synthChain = Promise.resolve();
+
   // Piper-Stimme synthetisieren (lädt beim ersten Mal das Modell)
   function synthPiper(text, key) {
     const cacheKey = key + '\u0001' + text;
     if (piperCache.has(cacheKey)) return piperCache.get(cacheKey);
-    const p = (async () => {
+    const p = synthChain.then(async () => {
       const session = await getSession(key);
       const blob = await session.predict(text);
       piperStored.add(key);
       return URL.createObjectURL(blob);
-    })();
+    });
+    synthChain = p.catch(() => {});
     piperCache.set(cacheKey, p);
     if (piperCache.size > 30) piperCache.delete(piperCache.keys().next().value);
     p.catch(() => piperCache.delete(cacheKey));
@@ -472,7 +483,11 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 
   function speakCurrent() {
     const token = state.token;
-    if (state.idx >= state.segments.length) return finish();
+    if (state.idx >= state.segments.length) {
+      // Text wird noch geladen: warten, bis neuer Text da ist
+      if (state.loading) { state.waiting = true; state.playing = true; setStatus('Warte auf weiteren Text …'); updateUI(); return; }
+      return finish();
+    }
     const seg = state.segments[state.idx];
     highlight();
     const code = LANGS[seg.lang] ? seg.lang : $('#defaultLang').value;
@@ -490,7 +505,7 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 
   // Nächsten Abschnitt schon im Hintergrund vorbereiten, wenn er mit KI-Stimme gelesen wird
   function prefetchNext(code) {
-    for (let k = 1; k <= 2; k++) {
+    for (let k = 1; k <= 3; k++) {
       const nxt = state.segments[state.idx + k];
       if (!nxt) break;
       const c = LANGS[nxt.lang] ? nxt.lang : code;
@@ -532,6 +547,7 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 
   function stopPlayback() {
     state.token++;
+    state.waiting = false;
     haltAudio();
     speechSynthesis.cancel();
     state.playing = false;
@@ -661,7 +677,11 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
     if (e.target.value) voiceChoice[code] = e.target.value;
     else delete voiceChoice[code];
     saveVoiceChoice();
-    if (e.target.value.startsWith('piper:')) downloadPiper(e.target.value.slice(6));
+    if (e.target.value.startsWith('piper:')) {
+      // Stimme laden und gleich in den Speicher legen, damit der erste Satz ohne Wartezeit kommt
+      const key = e.target.value.slice(6);
+      downloadPiper(key).then(() => getSession(key)).catch(() => {});
+    }
   });
 
   $('#voiceSel').addEventListener('click', (e) => {
@@ -670,30 +690,88 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
   });
 
   // ---------- Datei verarbeiten ----------
+  let loadSeq = 0; // verhindert, dass eine alte Datei eine neue überschreibt
+
   async function handleFile(file) {
     if (!file) return;
     if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) return setStatus('Bitte eine PDF-Datei wählen.');
     stopPlayback();
+    const my = ++loadSeq;
+    state.loading = true;
+    state.waiting = false;
+    state.segments = [];
+    state.idx = 0;
+    updateUI();
     $('#dropText').textContent = file.name;
     setStatus(`„${file.name}“ wird geöffnet …`);
+    let warmed = false;
+
+    // Text übernehmen. Während des Ladens kann schon vorgelesen werden.
+    const apply = (text, final, show = false) => {
+      if (my !== loadSeq) return;
+      state.segments = buildSegments(text);
+      if (!state.segments.length) { if (final) { $('#text').innerHTML = ''; setStatus('Kein Text gefunden.'); } return; }
+      // Anzeige nur ab und zu neu aufbauen (bei großen Dokumenten sonst zu langsam)
+      if (final || (show && !state.playing)) renderText();
+      if (!warmed) { warmed = true; warmUp(state.segments); }
+      updateUI();
+      if (state.waiting && state.idx < state.segments.length) { state.waiting = false; speakCurrent(); }
+    };
+
     try {
       const data = new Uint8Array(await file.arrayBuffer());
-      let text = await extractText(data);
-      if (text.replace(/\s/g, '').length < 40) {
-        const langs = [...document.querySelectorAll('#ocrLangs input:checked')].map(i => i.value);
-        if (!langs.length) return setStatus('Keine Textebene gefunden. Bitte mindestens eine Sprache für die Texterkennung in den Einstellungen wählen.');
-        setStatus('Keine Textebene gefunden – Texterkennung (OCR) startet. Das dauert etwas länger.');
-        text = await ocrPdf(data, langs);
+      const pdf = await pdfjsLib.getDocument({ data: data.slice() }).promise;
+      const total = pdf.numPages;
+      const pages = [];
+      let needOcr = false;
+
+      for (let p = 1; p <= total; p++) {
+        const page = await pdf.getPage(p);
+        const content = await page.getTextContent();
+        let line = '';
+        for (const it of content.items) line += it.str + (it.hasEOL ? '\n' : ' ');
+        pages.push(line);
+        if (my !== loadSeq) return;
+
+        const soFar = pages.join('').replace(/\s/g, '').length;
+        if (p === Math.min(3, total) && soFar < 40) { needOcr = true; break; }
+        const show = p <= 2 || p % 5 === 0 || p === total;
+        apply(pages.join('\n\n'), false, show);
+        if (show) {
+          if (!state.playing) setStatus(`Seite ${p} von ${total} gelesen${p < total ? ' – du kannst schon vorlesen' : ''}.`);
+        }
       }
-      state.segments = buildSegments(text);
-      state.idx = 0;
-      if (!state.segments.length) { $('#text').innerHTML = ''; return setStatus('Kein Text gefunden.'); }
-      renderText();
-      setStatus(`${state.segments.length} Sätze bereit. Tippe auf Vorlesen oder auf einen Satz.`);
+
+      if (needOcr) {
+        const langs = [...document.querySelectorAll('#ocrLangs input:checked')].map(i => i.value);
+        if (!langs.length) { state.loading = false; return setStatus('Keine Textebene gefunden. Bitte mindestens eine Sprache für die Texterkennung in den Einstellungen wählen.'); }
+        setStatus('Keine Textebene gefunden – Texterkennung (OCR) startet. Das dauert etwas länger.');
+        const text = await ocrPdf(data, langs);
+        if (my !== loadSeq) return;
+        apply(text, true);
+      } else {
+        apply(pages.join('\n\n'), true);
+      }
+
+      if (my !== loadSeq) return;
+      state.loading = false;
+      if (!state.segments.length) return;
+      if (state.waiting) { state.waiting = false; return finish(); }
+      setStatus(`${state.segments.length} Abschnitte bereit. Tippe auf Vorlesen oder auf einen Abschnitt.`);
       updateUI();
     } catch (err) {
       console.error(err);
+      state.loading = false;
       setStatus('Fehler beim Lesen der PDF: ' + (err && err.message ? err.message : err));
+    }
+  }
+
+  // Die KI-Stimmen der im Text vorkommenden Sprachen schon vorab in den Speicher laden
+  function warmUp(segs) {
+    const codes = new Set(segs.slice(0, 60).map(s => (LANGS[s.lang] ? s.lang : $('#defaultLang').value)));
+    for (const code of codes) {
+      const sel = pickVoice(code);
+      if (sel.engine === 'piper') getSession(sel.key).catch(() => {});
     }
   }
 
